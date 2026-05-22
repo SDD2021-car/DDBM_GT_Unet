@@ -33,6 +33,9 @@ import os
 from datasets.augment import AugmentPipe
 
 
+
+
+
 def main(args):
     # 先告诉 dist_util 我们要用哪块 GPU
     dist_util.set_device_id(args.gpu)

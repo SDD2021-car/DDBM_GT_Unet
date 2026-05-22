@@ -28,6 +28,38 @@ from pathlib import Path
 import Canny_train
 
 from PIL import Image
+
+
+
+def setup_botblock_hooks(model):
+    feature_store = {}
+    hooks = []
+    for name, module in model.named_modules():
+        if module.__class__.__name__ == "BotBlock":
+            def hook_fn(_module, _inputs, outputs, layer_name=name):
+                feature_store[layer_name] = outputs.detach().float().cpu()
+            hooks.append(module.register_forward_hook(hook_fn))
+    return feature_store, hooks
+
+
+def save_botblock_features(feature_store, output_dir, batch_idx, save_format="npy"):
+    if not feature_store:
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    for layer_name, tensor in feature_store.items():
+        safe_name = layer_name.replace(".", "_")
+        if save_format == "png":
+            vis = tensor.mean(dim=1, keepdim=True)  # [N,1,H,W]
+            vis_min = vis.amin(dim=(2, 3), keepdim=True)
+            vis_max = vis.amax(dim=(2, 3), keepdim=True)
+            vis = (vis - vis_min) / (vis_max - vis_min + 1e-8)
+            out_path = os.path.join(output_dir, f"batch_{batch_idx:06d}_{safe_name}.png")
+            vutils.save_image(vis, out_path, nrow=min(8, vis.shape[0]))
+        else:
+            out_path = os.path.join(output_dir, f"batch_{batch_idx:06d}_{safe_name}.npy")
+            np.save(out_path, tensor.numpy())
+
+
 def get_workdir(exp):
     workdir = f'{exp}'
     return workdir
@@ -112,6 +144,9 @@ def main():
     if args.use_fp16:
         model.convert_to_fp16()
     model.eval()
+    botblock_feature_store, botblock_hooks = ({}, [])
+    if args.save_botblock_features:
+        botblock_feature_store, botblock_hooks = setup_botblock_hooks(model)
 
     logger.log("sampling...")
 
@@ -168,11 +203,16 @@ def main():
             rho=args.rho,
             guidance=args.guidance
         )
+
+        if args.save_botblock_features:
+            save_botblock_features(
+                botblock_feature_store, args.botblock_feature_dir, i, args.botblock_feature_format
+            )
         # for i, x in enumerate([x0]):
         #     tensor2image1(x, i)
         # for i, x in enumerate(path):
         #     tensor2image(x, i)
-        save_images_with_filenames(path[200],x0_filename,'/data/yjy_data/DDBM_GT_Unet/result_S2O_opt_10000')
+        save_images_with_filenames(path[200],x0_filename,'/data/yjy_data/DDBM_GT_Unet/result_S2O_0521_2')
 
         sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
         sample = sample.permute(0, 2, 3, 1)
@@ -201,7 +241,8 @@ def main():
 
 
     logger.log(f"created {len(all_images) * args.batch_size * dist.get_world_size()} samples")
-
+    for hook in botblock_hooks:
+        hook.remove()
 
     arr = np.concatenate(all_images, axis=0)
     arr = arr[:args.num_samples]
@@ -228,16 +269,19 @@ def create_argparser():
         churn_step_ratio=0.33,
         rho=7.0,
         steps=100,
-        model_path="/data/yjy_data/DDBM_GT_Unet/logs_S2O_Canny_Original_CAIB_MSFM_scene_alpha_learnable_continue/ema_2_0.9999_010000.pt",
-        CNW_path="/data/yjy_data/DDBM_GT_Unet/logs_S2O_Canny_Original_CAIB_MSFM_scene_alpha_learnable_continue/ema_1_0.9999_010000.pt",
+        model_path="/data/yjy_data/DDBM_GT_Unet/scripts/logs_S2O_Canny_Original_CAIB_MSFM_scene_alpha_learnable/ema_2_0.9999_200000.pt",
+        CNW_path="/data/yjy_data/DDBM_GT_Unet/scripts/logs_S2O_Canny_Original_CAIB_MSFM_scene_alpha_learnable/ema_1_0.9999_200000.pt",
         path_refine_network="/NAS_data/yjy/DDBM_GT_Unet/DDBM_S2O_canny_results/Canny_train_logs/canny_optimization_result/train_result/unet_epoch_120.pth",
-        exp="logs_S2O_Canny_Original_CAIB_MSFM_scene_alpha_learnable_continue",
+        exp="logs_S2O_Canny_Original_CAIB_MSFM_scene_alpha_learnable",
         seed=42,
         ts="",
         upscale=False,
         num_workers=2,
         guidance=0.5,
         gpu=7,
+        save_botblock_features=True,
+        botblock_feature_dir="/data/yjy_data/DDBM_GT_Unet/save_features/botblock_features20",
+        botblock_feature_format="png",
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()
